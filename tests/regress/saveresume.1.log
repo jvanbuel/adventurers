@@ -1,0 +1,12 @@
+## Save right after starting
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+#NOCOMPARE Can't compare to advent430 due to version skew
+n
+seed 1240742801
+save
+n
+save
+y
+saveresume.adv
+y

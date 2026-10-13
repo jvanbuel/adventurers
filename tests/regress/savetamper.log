@@ -1,0 +1,7 @@
+## Resume from artificial "corrupted" save
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+#NOCOMPARE Can't compare to advent430 due to version skew
+n
+resume
+cheat_savetamper.adv

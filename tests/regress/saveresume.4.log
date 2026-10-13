@@ -1,0 +1,11 @@
+## Resume, then win
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+# Here to get class threshold of 426
+# Note, savefile name has trailing space
+#NOCOMPARE Reveals that advent430 does not resume in endgame gracefully.
+n
+resume
+y
+saveresume_win.adv 
+blast

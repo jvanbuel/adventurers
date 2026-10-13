@@ -1,0 +1,13 @@
+## Simple quit
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+#options: -o
+#NOCOMPARE Comment not interpreted by advent430
+n
+i
+l
+x
+z
+go south
+quit
+yes

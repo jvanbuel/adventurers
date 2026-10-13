@@ -1,0 +1,9 @@
+## Resume from invalid filename
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+#NOCOMPARE advent430 crashes on resume from invalid filename and we don't care.
+n
+seed 1240742801
+resume
+y
+/badfilename

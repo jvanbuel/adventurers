@@ -1,0 +1,8 @@
+## Resume from generated save with version mismatch error
+# SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
+# SPDX-License-Identifier: BSD-2-Clause
+#NOCOMPARE Reveals a bug in advent430 handling of saves with invalid versions.
+n
+resume
+y
+resume_badversion.adv
