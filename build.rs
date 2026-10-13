@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: (C) Eric S. Raymond <esr@thyrsus.com>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// The dungeon compiler.  This is a Rust port of make_dungeon.py from
-// Open Adventure.  It consumes the YAML description of the dungeon in
-// adventure.yaml and writes $OUT_DIR/dungeon.rs, which src/dungeon.rs
-// includes.
-//
-// The nontrivial part of this is the compilation of the YAML for
-// movement rules into the travel array that's actually used by
-// playermove().
+//! The dungeon compiler, a port of Open Adventure's make_dungeon.py.
+//!
+//! It reads adventure.yaml and writes $OUT_DIR/dungeon.rs: typed
+//! constants for every named location, object, message, motion and verb,
+//! plus the static tables that src/dungeon.rs exposes.  Travel rules are
+//! compiled per location into the form playermove() walks.
 
 use serde_yaml::Value;
 use std::collections::HashMap;
@@ -163,6 +161,11 @@ fn words_literal(v: Option<&Value>) -> String {
     format!("&[{}]", items.join(", "))
 }
 
+fn is_ident(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.chars().next().is_some_and(|c| !c.is_ascii_digit())
+}
+
 fn index_of(names: &[String], name: &str, what: &str) -> i64 {
     names
         .iter()
@@ -170,15 +173,14 @@ fn index_of(names: &[String], name: &str, what: &str) -> i64 {
         .unwrap_or_else(|| fail(&format!("unknown {what} {name}"))) as i64
 }
 
+/// One compiled travel rule, before rendering.
 struct TravelRow {
     motion: i64,
-    condtype: &'static str,
-    condarg1: i64,
-    condarg2: i64,
-    desttype: &'static str,
-    destval: i64,
+    cond: String,
+    dest: String,
+    /// Motion is HERE: the rule fires as soon as the player arrives.
+    on_arrival: bool,
     nodwarves: bool,
-    stop: bool,
 }
 
 fn main() {
@@ -197,22 +199,23 @@ fn main() {
     let locations = omap(&db["locations"]);
     let objects = omap(&db["objects"]);
     let messages = omap(&db["arbitrary_messages"]);
-    let hints = db["hints"].as_sequence().unwrap_or_else(|| fail("hints"));
-    let classes = db["classes"]
-        .as_sequence()
-        .unwrap_or_else(|| fail("classes"));
-    let thresholds = db["turn_thresholds"]
-        .as_sequence()
-        .unwrap_or_else(|| fail("turn_thresholds"));
-    let obituaries = db["obituaries"]
-        .as_sequence()
-        .unwrap_or_else(|| fail("obituaries"));
+    let seq = |key: &str| {
+        db[key]
+            .as_sequence()
+            .unwrap_or_else(|| fail(&format!("{key} must be a list")))
+    };
+    let hints = seq("hints");
+    let classes = seq("classes");
+    let thresholds = seq("turn_thresholds");
+    let obituaries = seq("obituaries");
     let dwarflocs: Vec<String> = str_list(Some(&db["dwarflocs"]));
 
-    let locnames: Vec<String> = locations.iter().map(|(n, _)| n.clone()).collect();
-    let msgnames: Vec<String> = messages.iter().map(|(n, _)| n.clone()).collect();
-    let objnames: Vec<String> = objects.iter().map(|(n, _)| n.clone()).collect();
-    let motionnames: Vec<String> = motions.iter().map(|(n, _)| n.clone()).collect();
+    let names = |v: &[(String, Value)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    let locnames = names(&locations);
+    let msgnames = names(&messages);
+    let objnames = names(&objects);
+    let motionnames = names(&motions);
+    let actnames = names(&actions);
 
     assert!(locations.len() <= 300);
     assert!(objects.len() <= 100);
@@ -220,37 +223,39 @@ fn main() {
     let mut out = String::new();
     out.push_str("// Generated from adventure.yaml by build.rs - do not hand-hack!\n\n");
 
-    // ---- Symbolic constants ------------------------------------------
-    let _ = writeln!(out, "pub const NLOCATIONS: usize = {};", locations.len());
-    let _ = writeln!(out, "pub const NOBJECTS: usize = {};", objects.len());
-    let _ = writeln!(out, "pub const NHINTS: usize = {};", hints.len());
-    let _ = writeln!(out, "pub const NCLASSES: usize = {};", classes.len());
-    let _ = writeln!(out, "pub const NDEATHS: usize = {};", obituaries.len());
-    let _ = writeln!(out, "pub const NTHRESHOLDS: usize = {};", thresholds.len());
-    let _ = writeln!(out, "pub const NMOTIONS: usize = {};", motions.len());
-    let _ = writeln!(out, "pub const NACTIONS: usize = {};", actions.len());
-    let _ = writeln!(out, "pub const NDWARVES: usize = {};", dwarflocs.len());
+    // ---- Table sizes ----------------------------------------------------
+    for (name, n) in [
+        ("NLOCATIONS", locations.len()),
+        ("NOBJECTS", objects.len()),
+        ("NMESSAGES", messages.len()),
+        ("NHINTS", hints.len()),
+        ("NCLASSES", classes.len()),
+        ("NDEATHS", obituaries.len()),
+        ("NMOTIONS", motions.len()),
+        ("NACTIONS", actions.len()),
+        ("NDWARVES", dwarflocs.len()),
+    ] {
+        let _ = writeln!(out, "pub const {name}: usize = {n};");
+    }
 
-    let emit_refs = |out: &mut String, title: &str, names: &[String]| {
-        let _ = writeln!(out, "\n// {title}");
+    // ---- Typed identifiers ------------------------------------------------
+    let emit_ids = |out: &mut String, ty: &str, names: &[String]| {
+        let _ = writeln!(out, "\n// {ty} identifiers");
         for (i, n) in names.iter().enumerate() {
             // Only names that are valid Rust identifiers become constants.
-            if n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && n.chars().next().is_some_and(|c| !c.is_ascii_digit())
-            {
-                let _ = writeln!(out, "pub const {n}: i32 = {i};");
+            if is_ident(n) {
+                let _ = writeln!(out, "pub const {n}: {ty} = {ty}({i});");
             }
         }
     };
-    emit_refs(&mut out, "Arbitrary messages", &msgnames);
-    emit_refs(&mut out, "Locations", &locnames);
-    emit_refs(&mut out, "Objects", &objnames);
-    emit_refs(&mut out, "Motions", &motionnames);
-    let actnames: Vec<String> = actions.iter().map(|(n, _)| n.clone()).collect();
-    emit_refs(&mut out, "Actions", &actnames);
+    emit_ids(&mut out, "Msg", &msgnames);
+    emit_ids(&mut out, "Loc", &locnames);
+    emit_ids(&mut out, "Obj", &objnames);
+    emit_ids(&mut out, "Motion", &motionnames);
+    emit_ids(&mut out, "Verb", &actnames);
 
-    // ---- Object state definitions -----------------------------------
-    out.push_str("\n// Object states\n");
+    // ---- Object state values ----------------------------------------------
+    out.push_str("\n// Object state values\n");
     let mut max_state = 0i64;
     for (name, attr) in &objects {
         if get(attr, "descriptions").is_none() {
@@ -267,11 +272,11 @@ fn main() {
     }
     let _ = writeln!(
         out,
-        "/// Maximum state value\npub const MAX_STATE: i32 = {max_state};"
+        "/// Largest object state value.\npub const MAX_STATE: i32 = {max_state};"
     );
 
-    // 0-origin index of bird's last song.  Bird should die after
-    // player hears this.
+    // Index of the bird's last song.  The bird dies after the player
+    // hears it.
     let bird = objects
         .iter()
         .find(|(n, _)| n == "BIRD")
@@ -279,19 +284,15 @@ fn main() {
     let deathbird = str_list(get(&bird.1, "sounds")).len() as i64 - 1;
     let _ = writeln!(out, "pub const BIRD_ENDSTATE: i32 = {deathbird};");
 
-    // ---- Arbitrary messages ------------------------------------------
-    let _ = writeln!(
-        out,
-        "\npub static ARBITRARY_MESSAGES: [Option<&str>; {}] = [",
-        messages.len()
-    );
+    // ---- Arbitrary messages -------------------------------------------------
+    out.push_str("\nstatic MESSAGES: [Option<&str>; NMESSAGES] = [\n");
     for (name, body) in &messages {
         let _ = writeln!(out, "    {}, // {name}", opt_str(Some(body)));
     }
     out.push_str("];\n");
 
-    // ---- Classes -----------------------------------------------------
-    let _ = writeln!(out, "\npub static CLASSES: [Class; {}] = [", classes.len());
+    // ---- Classes and turn thresholds ----------------------------------------
+    out.push_str("\npub(crate) static CLASSES: [Class; NCLASSES] = [\n");
     for c in classes {
         let _ = writeln!(
             out,
@@ -302,10 +303,9 @@ fn main() {
     }
     out.push_str("];\n");
 
-    // ---- Turn thresholds ----------------------------------------------
     let _ = writeln!(
         out,
-        "\npub static TURN_THRESHOLDS: [TurnThreshold; {}] = [",
+        "\npub(crate) static TURN_THRESHOLDS: [TurnThreshold; {}] = [",
         thresholds.len()
     );
     for t in thresholds {
@@ -319,110 +319,28 @@ fn main() {
     }
     out.push_str("];\n");
 
-    // ---- Locations ------------------------------------------------------
-    let _ = writeln!(
-        out,
-        "\npub static LOCATIONS: [Location; {}] = [",
-        locations.len()
-    );
-    for (i, (name, loc)) in locations.iter().enumerate() {
-        let desc = &loc["description"];
-        let sound = match get(loc, "sound") {
-            None => -1,
-            Some(s) => {
-                let s = str_of(s);
-                if s == "SILENT" {
-                    -1
-                } else {
-                    index_of(&msgnames, &s, "message")
-                }
-            }
-        };
-        let _ = writeln!(
-            out,
-            "    Location {{ // {i}: {name}\n        small: {},\n        big: {},\n        sound: {sound},\n        loud: {},\n    }},",
-            opt_str(get(desc, "short")),
-            opt_str(get(desc, "long")),
-            truthy(get(loc, "loud")),
-        );
-    }
-    out.push_str("];\n");
-
-    // ---- Objects ----------------------------------------------------------
-    let _ = writeln!(out, "\npub static OBJECTS: [Object; {}] = [", objects.len());
-    for (i, (name, attr)) in objects.iter().enumerate() {
-        let immovable = truthy(get(attr, "immovable"));
-        let (plac, fixd) = match get(attr, "locations") {
-            None => (0, 0),
-            Some(Value::Sequence(s)) => (
-                index_of(&locnames, &str_of(&s[0]), "location"),
-                index_of(&locnames, &str_of(&s[1]), "location"),
-            ),
-            Some(v) => (
-                index_of(&locnames, &str_of(v), "location"),
-                if immovable { -1 } else { 0 },
-            ),
-        };
-        let _ = writeln!(
-            out,
-            "    Object {{ // {i}: {name}\n        words: {},\n        inventory: {},\n        plac: {plac},\n        fixd: {fixd},\n        is_treasure: {},\n        descriptions: {},\n        sounds: {},\n        texts: {},\n        changes: {},\n    }},",
-            words_literal(get(attr, "words")),
-            opt_str(get(attr, "inventory")),
-            truthy(get(attr, "treasure")),
-            opt_str_list(get(attr, "descriptions")),
-            opt_str_list(get(attr, "sounds")),
-            opt_str_list(get(attr, "texts")),
-            opt_str_list(get(attr, "changes")),
-        );
-    }
-    out.push_str("];\n");
-
-    // ---- Obituaries -------------------------------------------------------
-    let _ = writeln!(
-        out,
-        "\npub static OBITUARIES: [Obituary; {}] = [",
-        obituaries.len()
-    );
-    for o in obituaries {
-        let _ = writeln!(
-            out,
-            "    Obituary {{ query: {}, yes_response: {} }},",
-            opt_str(get(o, "query")),
-            opt_str(get(o, "yes_response"))
-        );
-    }
-    out.push_str("];\n");
-
-    // ---- Hints ------------------------------------------------------------
-    let _ = writeln!(out, "\npub static HINTS: [Hint; {}] = [", hints.len());
-    for member in hints {
-        let h = &member["hint"];
-        let _ = writeln!(
-            out,
-            "    Hint {{ number: {}, penalty: {}, turns: {}, question: {}, hint: {} }},",
-            int_of(&h["number"]),
-            int_of(&h["penalty"]),
-            int_of(&h["turns"]),
-            opt_str(get(h, "question")),
-            opt_str(get(h, "hint"))
-        );
-    }
-    out.push_str("];\n");
-
-    // ---- Condition bits ---------------------------------------------------
+    // ---- Locations, with their condition bits and travel rules --------------
     let cond_bit = |name: &str| -> usize {
         COND_NAMES
             .iter()
             .position(|c| *c == name)
             .unwrap_or_else(|| fail(&format!("unknown condition {name}")))
     };
-    let _ = writeln!(
-        out,
-        "\npub static CONDITIONS: [i32; {}] = [",
-        locations.len()
+    let forced_bit = cond_bit("FORCED");
+    let travel = buildtravel(
+        &locations, &objects, &motions, &locnames, &msgnames, &objnames,
     );
-    for (name, loc) in &locations {
-        let mut bits: i64 = 0;
+
+    out.push_str("\nstatic LOCATIONS: [Location; NLOCATIONS] = [\n");
+    for (i, (name, loc)) in locations.iter().enumerate() {
+        let desc = &loc["description"];
+        let sound = match get(loc, "sound").map(str_of) {
+            None => "None".to_string(),
+            Some(s) if s == "SILENT" => "None".to_string(),
+            Some(s) => format!("Some(Msg({}))", index_of(&msgnames, &s, "message")),
+        };
+
+        let mut bits: u32 = 0;
         if let Some(Value::Mapping(conds)) = get(loc, "conditions") {
             for (k, v) in conds {
                 if truthy(Some(v)) {
@@ -435,80 +353,145 @@ fn main() {
                 bits |= 1 << cond_bit(&format!("H{}", str_of(&h["name"])));
             }
         }
-        let _ = writeln!(out, "    {bits}, // {name}");
+        // A location whose first rule fires unconditionally on arrival
+        // ("HERE") moves the player on without asking for a command.
+        let rules = &travel[i];
+        if get(desc, "long").is_some() && rules.first().is_some_and(|r| r.on_arrival) {
+            bits |= 1 << forced_bit;
+        }
+
+        let _ = writeln!(out, "    Location {{ // {i}: {name}");
+        let _ = writeln!(out, "        small: {},", opt_str(get(desc, "short")));
+        let _ = writeln!(out, "        big: {},", opt_str(get(desc, "long")));
+        let _ = writeln!(out, "        sound: {sound},");
+        let _ = writeln!(out, "        loud: {},", truthy(get(loc, "loud")));
+        let _ = writeln!(out, "        conditions: {bits:#x},");
+        out.push_str("        travel: &[\n");
+        for r in rules {
+            let _ = writeln!(
+                out,
+                "            TravelOp {{ motion: Motion({}), cond: {}, dest: {}, nodwarves: {} }},",
+                r.motion, r.cond, r.dest, r.nodwarves
+            );
+        }
+        out.push_str("        ],\n    },\n");
     }
     out.push_str("];\n");
 
-    // ---- Motions, actions and the "ignore" list ---------------------------
-    let mut ignore = String::new();
-    let _ = writeln!(out, "\npub static MOTIONS: [Motion; {}] = [", motions.len());
-    for (name, m) in &motions {
+    // ---- Objects -----------------------------------------------------------
+    out.push_str("\nstatic OBJECTS: [Object; NOBJECTS] = [\n");
+    for (i, (name, attr)) in objects.iter().enumerate() {
+        let immovable = truthy(get(attr, "immovable"));
+        let loc_of = |v: &Value| index_of(&locnames, &str_of(v), "location");
+        let (plac, fixd) = match get(attr, "locations") {
+            None => (0, "Fixed::Free".to_string()),
+            Some(Value::Sequence(s)) => {
+                (loc_of(&s[0]), format!("Fixed::At(Loc({}))", loc_of(&s[1])))
+            }
+            Some(v) => (
+                loc_of(v),
+                if immovable {
+                    "Fixed::Immovable"
+                } else {
+                    "Fixed::Free"
+                }
+                .to_string(),
+            ),
+        };
+        let _ = writeln!(out, "    Object {{ // {i}: {name}");
+        let _ = writeln!(out, "        words: {},", words_literal(get(attr, "words")));
         let _ = writeln!(
             out,
-            "    Motion {{ words: {} }}, // {name}",
-            words_literal(get(m, "words"))
+            "        inventory: {},",
+            opt_str(get(attr, "inventory"))
         );
-        if get(m, "oldstyle").is_some_and(|v| !truthy(Some(v))) {
-            for w in str_list(get(m, "words")) {
+        let _ = writeln!(out, "        plac: Loc({plac}),");
+        let _ = writeln!(out, "        fixd: {fixd},");
+        let _ = writeln!(
+            out,
+            "        is_treasure: {},",
+            truthy(get(attr, "treasure"))
+        );
+        for field in ["descriptions", "sounds", "texts", "changes"] {
+            let _ = writeln!(out, "        {field}: {},", opt_str_list(get(attr, field)));
+        }
+        out.push_str("    },\n");
+    }
+    out.push_str("];\n");
+
+    // ---- Obituaries and hints -------------------------------------------------
+    out.push_str("\npub(crate) static OBITUARIES: [Obituary; NDEATHS] = [\n");
+    for o in obituaries {
+        let _ = writeln!(
+            out,
+            "    Obituary {{ query: {}, yes_response: {} }},",
+            opt_str(get(o, "query")),
+            opt_str(get(o, "yes_response"))
+        );
+    }
+    out.push_str("];\n");
+
+    out.push_str("\npub(crate) static HINTS: [Hint; NHINTS] = [\n");
+    for member in hints {
+        let h = &member["hint"];
+        let _ = writeln!(
+            out,
+            "    Hint {{ turns: {}, penalty: {}, question: {}, hint: {} }},",
+            int_of(&h["turns"]),
+            int_of(&h["penalty"]),
+            opt_str(get(h, "question")),
+            opt_str(get(h, "hint"))
+        );
+    }
+    out.push_str("];\n");
+
+    // ---- Vocabulary -----------------------------------------------------------
+    // Single-letter words of entries marked `oldstyle: false` are ignored
+    // in oldstyle mode.
+    let mut ignore = String::new();
+    let mut collect_ignored = |body: &Value| {
+        if get(body, "oldstyle").is_some_and(|v| !truthy(Some(v))) {
+            for w in str_list(get(body, "words")) {
                 if w.len() == 1 {
                     ignore.push_str(&w.to_uppercase());
                 }
             }
         }
+    };
+
+    out.push_str("\nstatic MOTIONS: [MotionInfo; NMOTIONS] = [\n");
+    for (name, m) in &motions {
+        let _ = writeln!(
+            out,
+            "    MotionInfo {{ words: {} }}, // {name}",
+            words_literal(get(m, "words"))
+        );
+        collect_ignored(m);
     }
     out.push_str("];\n");
 
-    let _ = writeln!(out, "\npub static ACTIONS: [Action; {}] = [", actions.len());
+    out.push_str("\nstatic ACTIONS: [VerbInfo; NACTIONS] = [\n");
     for (name, a) in &actions {
         let _ = writeln!(
             out,
-            "    Action {{ words: {}, message: {}, noaction: {} }}, // {name}",
+            "    VerbInfo {{ words: {}, message: {}, noaction: {} }}, // {name}",
             words_literal(get(a, "words")),
             opt_str(get(a, "message")),
             get(a, "noaction").is_some()
         );
-        if get(a, "oldstyle").is_some_and(|v| !truthy(Some(v))) {
-            for w in str_list(get(a, "words")) {
-                if w.len() == 1 {
-                    ignore.push_str(&w.to_uppercase());
-                }
-            }
-        }
+        collect_ignored(a);
     }
     out.push_str("];\n");
-    let _ = writeln!(out, "\npub static IGNORE: &str = {ignore:?};");
+    let _ = writeln!(out, "\npub(crate) static IGNORE: &str = {ignore:?};");
 
-    // ---- Travel table -----------------------------------------------------
-    let (travel, tkey) = buildtravel(
-        &locations, &objects, &motions, &locnames, &msgnames, &objnames,
-    );
-    let _ = writeln!(out, "\npub const NTRAVEL: usize = {};", travel.len());
-    let _ = writeln!(out, "pub const NKEYS: usize = {};", tkey.len());
-    let keys: Vec<String> = tkey.iter().map(|k| k.to_string()).collect();
-    let _ = writeln!(
-        out,
-        "\npub static TKEY: [i32; {}] = [{}];",
-        tkey.len(),
-        keys.join(", ")
-    );
-    let _ = writeln!(out, "\npub static TRAVEL: [TravelOp; {}] = [", travel.len());
-    for t in &travel {
-        let _ = writeln!(
-            out,
-            "    TravelOp {{ motion: {}, condtype: CondType::{}, condarg1: {}, condarg2: {}, desttype: DestType::{}, destval: {}, nodwarves: {}, stop: {} }},",
-            t.motion, t.condtype, t.condarg1, t.condarg2, t.desttype, t.destval, t.nodwarves, t.stop
-        );
-    }
-    out.push_str("];\n");
-
-    // ---- Dwarf starting locations -----------------------------------------
+    // ---- Dwarf starting locations ----------------------------------------------
     let dl: Vec<String> = dwarflocs
         .iter()
-        .map(|l| index_of(&locnames, l, "location").to_string())
+        .map(|l| format!("Loc({})", index_of(&locnames, l, "location")))
         .collect();
     let _ = writeln!(
         out,
-        "\npub static DWARFLOCS: [i32; NDWARVES] = [{}];",
+        "\npub(crate) static DWARFLOCS: [Loc; NDWARVES] = [{}];",
         dl.join(", ")
     );
 
@@ -516,22 +499,17 @@ fn main() {
     fs::write(dest, out).unwrap();
 }
 
-/// Compile the YAML travel rules into the runtime travel table.
+/// Compile the YAML travel rules into per-location rule lists.
 ///
-/// This follows make_dungeon.py closely: first the rules are compiled
-/// to the "section 3" form of the old FORTRAN database (location,
-/// encoded destination, list of motions), then that is unpacked into
-/// the travel array.  In the encoded destination Y, M=Y/1000 is the
-/// condition and N=Y%1000 the destination:
-///   N<=300        location to go to
-///   300<N<=500    N-300 is a special-case motion
-///   N>500         message N-500 is printed
-///   M=0           unconditional
-///   0<M<100       done with M% probability
-///   M=100         unconditional, but forbidden to dwarves
-///   100<M<=200    must be carrying object M-100
-///   200<M<=300    must be carrying or in same room as M-200
-///   300<M         prop(M%100) must not be (M-300)/100
+/// This follows make_dungeon.py: each YAML rule expands into one entry
+/// per motion verb, all sharing the rule's condition and destination.
+/// A rule with no verbs gets the magic motion HERE (1), meaning "fire
+/// as soon as the player arrives".
+///
+/// Conditions map onto the C encoding as follows: none is `Always`;
+/// `[pct N]` is `Pct(N)`; `[nodwarves]` is `Pct(100)` plus the
+/// `nodwarves` flag (the C code rolls the die even then, so we must
+/// too); `[carry OBJ]`, `[with OBJ]` and `[not OBJ STATE]` map directly.
 fn buildtravel(
     locs: &[(String, Value)],
     objs: &[(String, Value)],
@@ -539,7 +517,7 @@ fn buildtravel(
     locnames: &[String],
     msgnames: &[String],
     objnames: &[String],
-) -> (Vec<TravelRow>, Vec<i64>) {
+) -> Vec<Vec<TravelRow>> {
     let mut verbmap: HashMap<String, i64> = HashMap::new();
     for (i, (_, m)) in motions.iter().enumerate() {
         for w in str_list(get(m, "words")) {
@@ -547,35 +525,60 @@ fn buildtravel(
         }
     }
 
-    let dencode = |action: &Value, name: &str| -> i64 {
+    let dencode = |action: &Value, name: &str| -> String {
         let a = action
             .as_sequence()
             .unwrap_or_else(|| fail(&format!("bad action in {name}")));
         match str_of(&a[0]).as_str() {
-            "goto" => index_of(locnames, &str_of(&a[1]), "location in goto clause"),
-            "special" => 300 + int_of(&a[1]),
-            "speak" => 500 + index_of(msgnames, &str_of(&a[1]), "message in speak clause"),
+            "goto" => {
+                let l = index_of(locnames, &str_of(&a[1]), "location in goto clause");
+                format!("Dest::Goto(Loc({l}))")
+            }
+            "special" => format!("Dest::Special({})", int_of(&a[1])),
+            "speak" => {
+                let m = index_of(msgnames, &str_of(&a[1]), "message in speak clause");
+                format!("Dest::Speak(Msg({m}))")
+            }
             other => fail(&format!("unknown action {other} in {name}")),
         }
     };
 
-    let cencode = |cond: Option<&Value>, name: &str| -> i64 {
-        let Some(cond) = cond else { return 0 };
+    let cencode = |cond: Option<&Value>, name: &str| -> (String, bool) {
+        let Some(cond) = cond else {
+            return ("TravelCond::Always".to_string(), false);
+        };
         let c = cond
             .as_sequence()
             .unwrap_or_else(|| fail(&format!("bad cond in {name}")));
+        let obj = |v: &Value, what: &str| index_of(objnames, &str_of(v), what);
         match str_of(&c[0]).as_str() {
-            "nodwarves" => 100,
-            "pct" => int_of(&c[1]),
-            "carry" => 100 + index_of(objnames, &str_of(&c[1]), "object in carry clause"),
-            "with" => 200 + index_of(objnames, &str_of(&c[1]), "object in with clause"),
+            "nodwarves" => ("TravelCond::Pct(100)".to_string(), true),
+            "pct" => {
+                let n = int_of(&c[1]);
+                assert!((1..100).contains(&n), "pct {n} out of range in {name}");
+                (format!("TravelCond::Pct({n})"), false)
+            }
+            "carry" => (
+                format!(
+                    "TravelCond::Carry(Obj({}))",
+                    obj(&c[1], "object in carry clause")
+                ),
+                false,
+            ),
+            "with" => (
+                format!(
+                    "TravelCond::With(Obj({}))",
+                    obj(&c[1], "object in with clause")
+                ),
+                false,
+            ),
             "not" => {
-                let obj = index_of(objnames, &str_of(&c[1]), "object in not clause");
+                let o = obj(&c[1], "object in not clause");
                 let state = match &c[2] {
                     Value::Number(n) => n.as_i64().unwrap(),
                     s => {
                         let s = str_of(s);
-                        let states = str_list(get(&objs[obj as usize].1, "states"));
+                        let states = str_list(get(&objs[o as usize].1, "states"));
                         states.iter().position(|x| *x == s).unwrap_or_else(|| {
                             fail(&format!(
                                 "unmatched state symbol {s} in not clause of {name}"
@@ -583,92 +586,42 @@ fn buildtravel(
                         }) as i64
                     }
                 };
-                300 + obj + 100 * state
+                (format!("TravelCond::Not(Obj({o}), {state})"), false)
             }
             other => fail(&format!("unknown condition {other} in {name}")),
         }
     };
 
-    // Section-3 form: (loc, encoded destination, motions...)
-    let mut ltravel: Vec<(i64, i64, Vec<i64>)> = Vec::new();
-    for (i, (name, loc)) in locs.iter().enumerate() {
-        let Some(Value::Sequence(rules)) = loc.get("travel") else {
-            continue;
-        };
-        for rule in rules {
-            let dest = dencode(&rule["action"], name) + 1000 * cencode(get(rule, "cond"), name);
-            let verbs = str_list(get(rule, "verbs"));
-            let mut mots: Vec<i64> = verbs
-                .iter()
-                .map(|v| {
-                    *verbmap
-                        .get(&v.to_uppercase())
-                        .unwrap_or_else(|| fail(&format!("unknown verb {v} in {name}")))
-                })
-                .collect();
-            if mots.is_empty() {
-                mots.push(1); // Magic dummy entry for null rules (HERE)
+    let mut travel: Vec<Vec<TravelRow>> = Vec::with_capacity(locs.len());
+    for (name, loc) in locs {
+        let mut rows = Vec::new();
+        if let Some(Value::Sequence(rules)) = loc.get("travel") {
+            for rule in rules {
+                let dest = dencode(&rule["action"], name);
+                let (cond, nodwarves) = cencode(get(rule, "cond"), name);
+                let mut mots: Vec<i64> = str_list(get(rule, "verbs"))
+                    .iter()
+                    .map(|v| {
+                        *verbmap
+                            .get(&v.to_uppercase())
+                            .unwrap_or_else(|| fail(&format!("unknown verb {v} in {name}")))
+                    })
+                    .collect();
+                if mots.is_empty() {
+                    mots.push(1); // HERE: fire on arrival
+                }
+                for motion in mots {
+                    rows.push(TravelRow {
+                        motion,
+                        cond: cond.clone(),
+                        dest: dest.clone(),
+                        on_arrival: motion == 1,
+                        nodwarves,
+                    });
+                }
             }
-            ltravel.push((i as i64, dest, mots));
         }
+        travel.push(rows);
     }
-
-    // Now unpack into the runtime format.
-    let mut travel = vec![TravelRow {
-        motion: 0,
-        condtype: "Goto",
-        condarg1: 0,
-        condarg2: 0,
-        desttype: "Goto",
-        destval: 0,
-        nodwarves: false,
-        stop: false,
-    }];
-    let mut tkey: Vec<i64> = vec![0];
-    let mut oldloc = 0;
-    for (loc, newloc, mots) in ltravel {
-        if loc != oldloc {
-            tkey.push(travel.len() as i64);
-            oldloc = loc;
-        } else if let Some(last) = travel.last_mut() {
-            last.stop = !last.stop;
-        }
-        for motion in mots {
-            let cond = newloc / 1000;
-            let nodwarves = cond == 100;
-            let (condtype, condarg1, condarg2) = if cond == 0 {
-                ("Goto", 0, 0)
-            } else if cond < 100 {
-                ("Pct", cond, 0)
-            } else if cond == 100 {
-                ("Goto", 100, 0)
-            } else if cond <= 200 {
-                ("Carry", cond - 100, 0)
-            } else if cond <= 300 {
-                ("With", cond - 200, 0)
-            } else {
-                ("Not", cond % 100, (cond - 300) / 100)
-            };
-            let dest = newloc % 1000;
-            let (desttype, destval) = if dest <= 300 {
-                ("Goto", dest)
-            } else if dest > 500 {
-                ("Speak", dest - 500)
-            } else {
-                ("Special", dest - 300)
-            };
-            travel.push(TravelRow {
-                motion,
-                condtype,
-                condarg1,
-                condarg2,
-                desttype,
-                destval,
-                nodwarves,
-                stop: false,
-            });
-        }
-        travel.last_mut().unwrap().stop = true;
-    }
-    (travel, tkey)
+    travel
 }

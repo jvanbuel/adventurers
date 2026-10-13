@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright Eric S. Raymond <esr@thyrsus.com>
 // SPDX-License-Identifier: BSD-2-Clause
-//
-// Runs Open Adventure's regression suite against the Rust port.
-//
-// Each tests/regress/*.log is a command script; it is fed to `advent`
-// on stdin (with any options from a "#options:" line) and the output
-// must match the corresponding .chk file byte for byte.  Logs run in
-// alphabetical order in a shared scratch directory, because some of
-// them (saveresume.*) depend on files written by earlier ones.
+
+//! Runs Open Adventure's regression suite against the `advent` binary.
+//!
+//! Each `tests/regress/*.log` is a command script; it is fed to `advent`
+//! on stdin (with any options from a "#options:" line) and the output
+//! must match the corresponding `.chk` file byte for byte.  Logs run in
+//! alphabetical order in a shared scratch directory, because some of
+//! them (`saveresume.*`) depend on files written by earlier ones.
 
 use std::fs;
 use std::io::Write;
