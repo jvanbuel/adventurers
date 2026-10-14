@@ -104,7 +104,7 @@ private.
 | `src/engine/dwarves.rs`     | Dwarves and the pirate                             |
 | `src/engine/hints.rs`       | Offering hints                                     |
 | `src/engine/closing.rs`     | Lamp, cave closing, the end game                   |
-| `src/engine/actions.rs`     | What each verb does                                |
+| `src/engine/actions/`       | What each verb does, grouped by what it acts on    |
 | `src/engine/score.rs`       | Death, scoring, game over                          |
 | `src/objects.rs`            | Object positions, states and room lists            |
 | `src/state.rs`              | The saveable game record                           |
